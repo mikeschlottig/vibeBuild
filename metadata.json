@@ -1,0 +1,5 @@
+{
+  "name": "VibeBuilder AI",
+  "description": "A high-level application builder inspired by VibeSDK, featuring phase-based generation and multi-model support.",
+  "requestFramePermissions": []
+}
