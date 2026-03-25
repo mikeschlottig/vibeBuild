@@ -1,7 +1,8 @@
-import React, { useState, useEffect } from 'react';
-import { Send, Plus, MessageSquare, Settings } from 'lucide-react';
+import React, { useState, useEffect, useCallback } from 'react';
+import { Send, Plus, MessageSquare, Settings, LoaderCircle, Trash2 } from 'lucide-react';
 import { api } from '../lib/api';
 import { motion, AnimatePresence } from 'motion/react';
+import { toast } from 'sonner';
 
 interface Message {
   id: string;
@@ -21,18 +22,31 @@ export function ChatSidebar({ projectId, onProjectSelect, onMessageSent }: { pro
   const [loading, setLoading] = useState(false);
   const [selectedModel, setSelectedModel] = useState('mistralai/mistral-7b-instruct');
 
-  useEffect(() => {
+  const refreshProjects = useCallback(() => {
     api.getProjects().then(setProjects);
   }, []);
 
   useEffect(() => {
+    refreshProjects();
+  }, [refreshProjects]);
+
+  useEffect(() => {
     if (projectId) {
       api.getMessages(projectId).then(setMessages);
+    } else {
+      setMessages([]);
     }
   }, [projectId]);
 
   const handleSend = async () => {
-    if (!input.trim() || !projectId) return;
+    console.log('handleSend triggered', { input, projectId, selectedModel });
+    if (!input.trim()) return;
+    
+    if (!projectId) {
+      console.warn('No project ID selected');
+      toast.error('Please select or create a project first');
+      return;
+    }
     
     const userMsg = { id: Date.now().toString(), role: 'user', content: input };
     setMessages(prev => [...prev, userMsg]);
@@ -44,10 +58,40 @@ export function ChatSidebar({ projectId, onProjectSelect, onMessageSent }: { pro
       setMessages(prev => [...prev, { id: Date.now().toString(), role: 'assistant', content: res.content }]);
       // Trigger file refresh
       onMessageSent?.();
-    } catch (err) {
+    } catch (err: any) {
       console.error(err);
+      toast.error(err.response?.data?.error || 'Failed to send message');
     } finally {
       setLoading(false);
+    }
+  };
+
+  const handleCreateProject = async () => {
+    const name = prompt('Project Name?');
+    if (name) {
+      try {
+        const p = await api.createProject(name, '');
+        refreshProjects();
+        onProjectSelect(p.id);
+        toast.success(`Project "${name}" created`);
+      } catch (err) {
+        toast.error('Failed to create project');
+      }
+    }
+  };
+
+  const handleDeleteProject = async () => {
+    if (!projectId) return;
+    const project = projects.find(p => p.id === projectId);
+    if (!confirm(`Are you sure you want to delete project "${project?.name}"?`)) return;
+
+    try {
+      await api.deleteProject(projectId);
+      toast.success('Project deleted');
+      onProjectSelect('');
+      refreshProjects();
+    } catch (err) {
+      toast.error('Failed to delete project');
     }
   };
 
@@ -55,12 +99,14 @@ export function ChatSidebar({ projectId, onProjectSelect, onMessageSent }: { pro
     <div className="w-80 border-r border-border bg-card flex flex-col h-full">
       <div className="p-4 border-b flex justify-between items-center">
         <h2 className="font-bold text-lg">VibeBuilder</h2>
-        <button onClick={() => {
-          const name = prompt('Project Name?');
-          if (name) api.createProject(name, '').then(p => onProjectSelect(p.id));
-        }} className="p-2 hover:bg-accent rounded-full">
-          <Plus size={20} />
-        </button>
+        <div className="flex gap-1">
+          <button onClick={handleDeleteProject} disabled={!projectId} className="p-2 hover:bg-red-500/10 text-zinc-500 hover:text-red-500 rounded-full transition-colors disabled:opacity-30">
+            <Trash2 size={18} />
+          </button>
+          <button onClick={handleCreateProject} className="p-2 hover:bg-accent rounded-full transition-colors">
+            <Plus size={20} />
+          </button>
+        </div>
       </div>
 
       <div className="p-2 border-b">
@@ -133,8 +179,12 @@ export function ChatSidebar({ projectId, onProjectSelect, onMessageSent }: { pro
             placeholder="Describe your app..."
             className="flex-1 bg-muted rounded-md px-3 py-2 text-sm outline-none focus:ring-1 ring-primary"
           />
-          <button onClick={handleSend} className="p-2 bg-primary text-primary-foreground rounded-md">
-            <Send size={18} />
+          <button 
+            onClick={handleSend} 
+            disabled={loading || !input.trim()}
+            className="p-2 bg-primary text-primary-foreground rounded-md disabled:opacity-50 disabled:cursor-not-allowed transition-all"
+          >
+            {loading ? <LoaderCircle size={18} className="animate-spin" /> : <Send size={18} />}
           </button>
         </div>
       </div>

@@ -33,11 +33,23 @@ export default function App() {
 
   useEffect(() => {
     if (projectId) {
-      api.getFiles(projectId).then(setFiles);
+      api.getFiles(projectId).then(newFiles => {
+        setFiles(newFiles);
+        // Always select the first file of the new project if no file is selected or if the current selected file is not in the new project
+        if (newFiles.length > 0) {
+          setSelectedFile(newFiles[0]);
+        } else {
+          setSelectedFile(null);
+        }
+      });
       api.getProjects().then(projs => {
         const p = projs.find((x: any) => x.id === projectId);
         setProject(p);
       });
+    } else {
+      setFiles([]);
+      setSelectedFile(null);
+      setProject(null);
     }
   }, [projectId]);
 
@@ -79,7 +91,11 @@ export default function App() {
                 onFileSelect={setSelectedFile} 
                 selectedPath={selectedFile?.path} 
               />
-              <CodeEditor file={selectedFile} />
+              <CodeEditor 
+            file={selectedFile} 
+            projectId={projectId} 
+            onSave={refreshFiles} 
+          />
             </>
           ) : (
             <div className="flex-1 overflow-y-auto bg-zinc-950">

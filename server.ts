@@ -61,9 +61,24 @@ async function startServer() {
     res.json({ id, name, description });
   });
 
+  app.delete("/api/projects/:id", (req, res) => {
+    const projectId = req.params.id;
+    db.prepare("DELETE FROM messages WHERE project_id = ?").run(projectId);
+    db.prepare("DELETE FROM files WHERE project_id = ?").run(projectId);
+    db.prepare("DELETE FROM projects WHERE id = ?").run(projectId);
+    res.json({ success: true });
+  });
+
   app.get("/api/projects/:id/files", (req, res) => {
     const files = db.prepare("SELECT * FROM files WHERE project_id = ?").all(req.params.id);
     res.json(files);
+  });
+
+  app.put("/api/projects/:id/files", (req, res) => {
+    const { path, content } = req.body;
+    const projectId = req.params.id;
+    db.prepare("INSERT OR REPLACE INTO files (id, project_id, path, content) VALUES ((SELECT id FROM files WHERE project_id = ? AND path = ?), ?, ?, ?)").run(projectId, path, projectId, path, content);
+    res.json({ success: true });
   });
 
   app.get("/api/projects/:id/messages", (req, res) => {
@@ -74,55 +89,99 @@ async function startServer() {
   app.post("/api/chat", async (req, res) => {
     const { projectId, message, model } = req.body;
     
+    if (!projectId) {
+      return res.status(400).json({ error: "Project ID is required" });
+    }
+
     // Save user message
     const userMsgId = Math.random().toString(36).substring(7);
     db.prepare("INSERT INTO messages (id, project_id, role, content) VALUES (?, ?, ?, ?)").run(userMsgId, projectId, 'user', message);
 
     try {
-      const apiKey = process.env.OPENROUTER_API_KEY;
-      
-      // Step 1: Check if project has a blueprint. If not, generate one.
       const project = db.prepare("SELECT * FROM projects WHERE id = ?").get(projectId) as any;
-      
+      if (!project) {
+        return res.status(404).json({ error: "Project not found" });
+      }
+
       let aiContent = "";
-      
+      let response;
+
+      const getProviderConfig = (modelName: string) => {
+        if (modelName.startsWith("mistralai/")) {
+          return {
+            url: "https://api.mistral.ai/v1/chat/completions",
+            key: process.env.MISTRAL_API_KEY,
+            model: modelName.replace("mistralai/", "")
+          };
+        } else if (modelName.startsWith("groq/")) {
+          return {
+            url: "https://api.groq.com/openai/v1/chat/completions",
+            key: process.env.GROQ_API_KEY,
+            model: modelName.replace("groq/", "")
+          };
+        } else {
+          return {
+            url: "https://openrouter.ai/api/v1/chat/completions",
+            key: process.env.OPENROUTER_API_KEY,
+            model: modelName
+          };
+        }
+      };
+
+      const config = getProviderConfig(model || "mistralai/mistral-large-latest");
+
+      if (!config.key) {
+        throw new Error(`API key for ${config.url} is not configured`);
+      }
+
       if (!project.blueprint) {
         // Generate Blueprint
-        const blueprintResponse = await axios.post("https://openrouter.ai/api/v1/chat/completions", {
-          model: model || "mistralai/mistral-large",
+        response = await axios.post(config.url, {
+          model: config.model,
           messages: [
             { role: "system", content: "You are a VibeSDK Architect. Generate a JSON blueprint for the requested app. Include 'title', 'description', 'techStack', and 'phases' (array of objects with 'name' and 'files' to be created)." },
             { role: "user", content: message }
           ],
           response_format: { type: "json_object" }
         }, {
-          headers: { "Authorization": `Bearer ${apiKey}` }
+          headers: { "Authorization": `Bearer ${config.key}` }
         });
         
-        const blueprint = blueprintResponse.data.choices[0].message.content;
+        const blueprint = response.data.choices[0].message.content;
         db.prepare("UPDATE projects SET blueprint = ? WHERE id = ?").run(blueprint, projectId);
         aiContent = `Blueprint generated for **${project.name}**. Starting implementation phases...\n\n${blueprint}`;
       } else {
         // Implementation Phase
-        const implementationResponse = await axios.post("https://openrouter.ai/api/v1/chat/completions", {
-          model: model || "mistralai/codestral-22b",
+        response = await axios.post(config.url, {
+          model: config.model,
           messages: [
             { role: "system", content: "You are a VibeSDK Developer. Based on the blueprint, generate the code for the next phase. Return a JSON array of objects with 'path' and 'content'." },
             { role: "user", content: `Blueprint: ${project.blueprint}\n\nUser Request: ${message}` }
           ],
           response_format: { type: "json_object" }
         }, {
-          headers: { "Authorization": `Bearer ${apiKey}` }
+          headers: { "Authorization": `Bearer ${config.key}` }
         });
 
-        const filesData = JSON.parse(implementationResponse.data.choices[0].message.content);
-        if (filesData.files) {
+        const content = response.data.choices[0].message.content;
+        let filesData;
+        try {
+          filesData = JSON.parse(content);
+        } catch (e) {
+          // Handle cases where AI might return raw JSON or markdown wrapped JSON
+          const jsonMatch = content.match(/\{[\s\S]*\}/);
+          filesData = jsonMatch ? JSON.parse(jsonMatch[0]) : { files: [] };
+        }
+
+        if (filesData.files && Array.isArray(filesData.files)) {
           for (const file of filesData.files) {
             const fileId = Math.random().toString(36).substring(7);
             db.prepare("INSERT OR REPLACE INTO files (id, project_id, path, content) VALUES (?, ?, ?, ?)").run(fileId, projectId, file.path, file.content);
           }
+          aiContent = `Phase implemented. Generated ${filesData.files.length} files.`;
+        } else {
+          aiContent = content; // Fallback if no files array
         }
-        aiContent = `Phase implemented. Generated ${filesData.files?.length || 0} files.`;
       }
 
       const aiMsgId = Math.random().toString(36).substring(7);
@@ -131,7 +190,8 @@ async function startServer() {
       res.json({ content: aiContent });
     } catch (error: any) {
       console.error("AI Error:", error.response?.data || error.message);
-      res.status(500).json({ error: "Failed to get AI response" });
+      const errorMsg = error.response?.data?.error?.message || error.message || "Failed to get AI response";
+      res.status(500).json({ error: errorMsg });
     }
   });
 
